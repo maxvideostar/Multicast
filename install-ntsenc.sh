@@ -93,7 +93,8 @@ def default_channel():
                   "bitrate": 6000, "gop": 50, "bframes": 2, "profile": "high", "low_power": "auto"},
         "audio": {"codec": "mp2", "bitrate": 192, "channels": 2, "samplerate": 48000},
         "ts": {"service_id": 1, "service_name": "", "provider": "nTs-Encoder", "pmt_pid": 4096,
-               "video_pid": 256, "audio_pid": 257, "muxrate": 0, "pcr_period": 20},
+               "video_pid": 256, "audio_pid": 257, "audio_pids": "", "pid_mode": "manual",
+               "muxrate": 0, "pcr_period": 20},
         "out": {"udp": "udp://239.1.1.1:1234", "ttl": 16, "localaddr": "",
                 "srt": "", "rtmp": "", "hls": False, "hls_time": 2, "hls_list": 6, "httpts": True},
     }
@@ -139,11 +140,106 @@ try:
     FF_VER = subprocess.run([FFMPEG, "-version"], capture_output=True, text=True, timeout=15).stdout.splitlines()[0]
 except Exception: FF_VER = "ffmpeg ?"
 
+# ---------------------------------------------------------------- PIDs
+RESOLVED = {}   # ch_id -> PID-urile efective folosite la ultima pornire
+
+def input_url(i):
+    url = i["url"].strip()
+    sch = urlparse(url).scheme.lower()
+    if sch in ("udp", "rtp"):
+        sep = "&" if "?" in url else "?"
+        if "fifo_size" not in url: url += f"{sep}fifo_size=1000000&overrun_nonfatal=1"; sep = "&"
+        if "timeout" not in url: url += f"{sep}timeout=10000000"
+        try:
+            hostpart = (urlparse(url).hostname or "")
+            if hostpart and 224 <= int(hostpart.split(".")[0]) <= 239 and "reuse" not in url: url += "&reuse=1"
+        except ValueError: pass
+    return url
+
+def probe_source(url):
+    """Analizează sursa: programe, PMT, PID-uri, codecuri, limbi."""
+    try:
+        r = subprocess.run(["ffprobe", "-hide_banner", "-v", "error", "-analyzeduration", "4000000", "-probesize", "8000000",
+                            "-show_programs", "-show_streams", "-of", "json", url],
+                           capture_output=True, text=True, timeout=25)
+        j = json.loads(r.stdout or "{}")
+    except subprocess.TimeoutExpired:
+        return {"error": "Timp depășit — sursa nu trimite date"}
+    except Exception as e:
+        return {"error": str(e)}
+    def st(x):
+        try: pid = int(str(x.get("id", "0")), 16) if str(x.get("id", "")).startswith("0x") else int(x.get("id") or 0)
+        except ValueError: pid = 0
+        t = x.get("tags") or {}
+        info = x.get("codec_name") or "?"
+        if x.get("codec_type") == "video" and x.get("width"):
+            info += f" {x['width']}x{x['height']}" + (" i" if x.get("field_order") in ("tt", "bb", "tb", "bt") else "")
+        if x.get("codec_type") == "audio":
+            info += f" {x.get('sample_rate','')}Hz {x.get('channels','')}ch"
+        return {"index": x.get("index"), "pid": pid, "type": x.get("codec_type", "?"), "codec": info,
+                "lang": t.get("language", "")}
+    progs = []
+    for pg in j.get("programs") or []:
+        t = pg.get("tags") or {}
+        progs.append({"program_id": pg.get("program_id"), "pmt_pid": pg.get("pmt_pid"), "pcr_pid": pg.get("pcr_pid"),
+                      "name": t.get("service_name", ""), "provider": t.get("service_provider", ""),
+                      "streams": sorted([st(x) for x in pg.get("streams") or []], key=lambda z: z["index"] or 0)})
+    if not progs and j.get("streams"):
+        progs.append({"program_id": 0, "pmt_pid": 0, "pcr_pid": 0, "name": "", "provider": "",
+                      "streams": [st(x) for x in j["streams"]]})
+    if not progs: return {"error": (r.stderr or "Nicio informație de la sursă").strip()[-300:]}
+    return {"programs": progs}
+
+def parse_pids(txt):
+    out = []
+    for x in re.split(r"[,\s;]+", str(txt or "").strip()):
+        if not x: continue
+        try: out.append(int(x, 16) if x.lower().startswith("0x") else int(x))
+        except ValueError: pass
+    return out
+
+def resolve_pids(ch, src=None):
+    """PID-urile efective: manual sau copiate din sursă (src = rezultat probe_source)."""
+    ts, i = ch["ts"], ch["input"]
+    n_audio = 0 if ch["audio"]["codec"] == "none" else (1 if (not i.get("all_audio") or i["type"] == "v4l2") else 8)
+    r = {"sid": int(ts["service_id"]), "pmt": int(ts["pmt_pid"]), "vpid": int(ts["video_pid"]),
+         "apids": [], "mode": "manual", "name": ts.get("service_name") or ch["name"],
+         "provider": ts.get("provider") or "nTs-Encoder"}
+    man = parse_pids(ts.get("audio_pids"))
+    for k in range(n_audio):
+        r["apids"].append(man[k] if k < len(man) else (man[-1] + k - len(man) + 1 if man else int(ts["audio_pid"]) + k))
+    # ce afișăm: pistele cunoscute (lista manuală / sursa); restul sunt rezerve pentru „toate pistele”
+    r["show"] = (man[:n_audio] if man else r["apids"][:1]) + (["…"] if n_audio > max(1, len(man)) else [])
+    if ts.get("pid_mode") == "source" and i["type"] == "url" and src and src.get("programs"):
+        want = str(i.get("program") or "").strip()
+        progs = src["programs"]
+        pg = next((p for p in progs if str(p["program_id"]) == want), None) if want else \
+             next((p for p in progs if any(s["type"] == "video" for s in p["streams"])), progs[0])
+        if pg:
+            vids = [s for s in pg["streams"] if s["type"] == "video"]
+            auds = [s for s in pg["streams"] if s["type"] == "audio"]
+            if vids and vids[0]["pid"] >= 16: r["vpid"] = vids[0]["pid"]
+            if auds and n_audio:
+                r["apids"] = [s["pid"] for s in auds[:n_audio] if s["pid"] >= 16] or r["apids"]
+                r["show"] = list(r["apids"])
+            if pg.get("program_id"): r["sid"] = int(pg["program_id"])
+            if pg.get("pmt_pid"): r["pmt"] = int(pg["pmt_pid"])
+            if not ts.get("service_name") and pg.get("name"): r["name"] = pg["name"]
+            r["mode"] = "sursă"
+    return r
+
+def check_pids(r):
+    allp = [r["pmt"], r["vpid"]] + [x for x in r["show"] if isinstance(x, int)]
+    bad = [p for p in allp if not (16 <= p <= 8190)]
+    if bad: return f"PID invalid: {bad} (permis 16–8190)"
+    if len(set(allp)) != len(allp): return f"PID-uri duplicate: {allp}"
+    return ""
+
 # ---------------------------------------------------------------- command builder
 def teeesc(s): return str(s).replace("\\", "\\\\").replace("|", "\\|").replace("[", "\\[").replace("]", "\\]")
 def optesc(s): return str(s).replace("\\", "\\\\").replace(":", "\\:")
 
-def build_cmd(ch, idx):
+def build_cmd(ch, idx, src=None, store=True):
     i, v, a, ts, o = ch["input"], ch["video"], ch["audio"], ch["ts"], ch["out"]
     dev = CFG.get("vaapi_device") or "/dev/dri/renderD128"
     vc = v["codec"]
@@ -173,18 +269,10 @@ def build_cmd(ch, idx):
                     "-ar", "48000", "-i", i["alsa_dev"]]
             amaps = ["1:a:0"]
     else:
-        url = i["url"].strip()
+        url = input_url(i)
         sch = urlparse(url).scheme.lower()
         cmd += ["-fflags", "+genpts+discardcorrupt", "-analyzeduration", "3000000", "-probesize", "5000000"]
-        if sch in ("udp", "rtp"):
-            sep = "&" if "?" in url else "?"
-            if "fifo_size" not in url: url += f"{sep}fifo_size=1000000&overrun_nonfatal=1"; sep = "&"
-            if "timeout" not in url: url += f"{sep}timeout=10000000"
-            try:
-                hostpart = (urlparse(url).hostname or "")
-                if hostpart and 224 <= int(hostpart.split(".")[0]) <= 239 and "reuse" not in url: url += "&reuse=1"
-            except ValueError: pass
-        elif sch in ("http", "https"):
+        if sch in ("http", "https"):
             cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5", "-rw_timeout", "10000000"]
         elif sch in ("rtmp", "rtmps"):
             cmd += ["-rw_timeout", "10000000"]
@@ -249,17 +337,17 @@ def build_cmd(ch, idx):
                     "-ac", str(a.get("channels") or 2), "-ar", str(a.get("samplerate") or 48000),
                     "-af", "aresample=async=1:first_pts=0"]
     # --- PIDs / metadata
-    cmd += ["-streamid", f"0:{int(ts['video_pid'])}"]
+    pr = resolve_pids(ch, src)
+    if store: RESOLVED[ch["id"]] = pr
+    cmd += ["-streamid", f"0:{pr['vpid']}"]
     if amaps:
-        nA = 1 if not i.get("all_audio") or i["type"] == "v4l2" else 8
-        for k in range(nA): cmd += ["-streamid", f"{1+k}:{int(ts['audio_pid'])+k}"]
-    cmd += ["-metadata", f"service_name={ts.get('service_name') or ch['name']}",
-            "-metadata", f"service_provider={ts.get('provider') or 'nTs-Encoder'}",
+        for k, ap in enumerate(pr["apids"]): cmd += ["-streamid", f"{1+k}:{ap}"]
+    cmd += ["-metadata", f"service_name={pr['name']}", "-metadata", f"service_provider={pr['provider']}",
             "-max_muxing_queue_size", "2048"]
     # --- outputs: encoderul scrie DOAR UDP (multicast + loopback intern).
     # SRT/RTMP/HLS/HTTP-TS sunt alimentate din loopback de procese separate,
     # astfel încât căderea unei ieșiri de rețea nu poate bloca multicastul.
-    tsopt = [f"mpegts_service_id={int(ts['service_id'])}", f"mpegts_pmt_start_pid={int(ts['pmt_pid'])}",
+    tsopt = [f"mpegts_service_id={pr['sid']}", f"mpegts_pmt_start_pid={pr['pmt']}",
              "mpegts_flags=+resend_headers+system_b", f"pcr_period={int(ts.get('pcr_period') or 20)}"]
     mr = int(ts.get("muxrate") or 0)
     if mr: tsopt.append(f"muxrate={mr*1000}")
@@ -275,14 +363,14 @@ def build_cmd(ch, idx):
 
 def sidecar_cmd(kind, target, ch):
     ts, a = ch["ts"], ch["audio"]
+    pr = RESOLVED.get(ch["id"]) or resolve_pids(ch)
     base = [FFMPEG, "-hide_banner", "-loglevel", "error", "-fflags", "+genpts+discardcorrupt",
             "-analyzeduration", "2000000", "-f", "mpegts", "-i", "pipe:0"]
-    meta = ["-metadata", f"service_name={ts.get('service_name') or ch['name']}",
-            "-metadata", f"service_provider={ts.get('provider') or 'nTs-Encoder'}"]
-    tsflags = ["-mpegts_service_id", str(int(ts["service_id"])), "-mpegts_pmt_start_pid", str(int(ts["pmt_pid"])),
+    meta = ["-metadata", f"service_name={pr['name']}", "-metadata", f"service_provider={pr['provider']}"]
+    tsflags = ["-mpegts_service_id", str(pr["sid"]), "-mpegts_pmt_start_pid", str(pr["pmt"]),
                "-mpegts_flags", "+resend_headers"]
-    tsflags += ["-streamid", f"0:{int(ts['video_pid'])}"]
-    for k in range(8): tsflags += ["-streamid", f"{1+k}:{int(ts['audio_pid'])+k}"]
+    tsflags += ["-streamid", f"0:{pr['vpid']}"]
+    for k, ap in enumerate(pr["apids"]): tsflags += ["-streamid", f"{1+k}:{ap}"]
     if kind == "srt":
         return base + ["-map", "0", "-c", "copy"] + meta + tsflags + ["-f", "mpegts", target]
     if kind == "rtmp":
@@ -292,7 +380,7 @@ def sidecar_cmd(kind, target, ch):
     if kind == "hls":
         o = ch["out"]; d = os.path.join(HLS_DIR, ch["id"])
         ac = ["-c:a", "copy"] if a["codec"] in ("aac", "none") else ["-c:a", "aac", "-b:a", "128k", "-ar", "48000"]
-        return base + ["-map", "0:v:0", "-map", "0:a?", "-c:v", "copy"] + ac + meta + tsflags[6:] + ["-f", "hls", "-hls_time", str(int(o.get("hls_time") or 2)),
+        return base + ["-map", "0:v:0", "-map", "0:a?", "-c:v", "copy"] + ac + meta + [x for k, x in enumerate(tsflags) if k >= 6] + ["-f", "hls", "-hls_time", str(int(o.get("hls_time") or 2)),
                        "-hls_list_size", str(int(o.get("hls_list") or 6)),
                        "-hls_flags", "delete_segments+omit_endlist+independent_segments",
                        "-hls_segment_filename", os.path.join(d, "s_%06d.ts"), os.path.join(d, "index.m3u8")]
@@ -455,7 +543,21 @@ class Worker:
         while self.want:
             ch, idx = find_channel(self.cid)
             if not ch: break
-            cmd = build_cmd(ch, idx)
+            src = None
+            if ch["ts"].get("pid_mode") == "source" and ch["input"]["type"] == "url":
+                self.st["state"] = "analizează"
+                src = probe_source(input_url(ch["input"]))
+                if src.get("error"): self.logln("PROBE: " + src["error"] + " — folosesc PID-urile manuale")
+                self.st["src"] = src if not src.get("error") else None
+            cmd = build_cmd(ch, idx, src)
+            err = check_pids(RESOLVED[ch["id"]])
+            if err:
+                self.logln("EROARE: " + err); self.st.update(state="eroare", last_err=err)
+                for _ in range(100):
+                    if not self.want: break
+                    time.sleep(0.1)
+                continue
+            self.logln("PID: SID %(sid)d · PMT %(pmt)d · video %(vpid)d · audio %(apids)s (%(mode)s)" % RESOLVED[ch["id"]])
             self.logln("START: " + shlex.join(cmd))
             self.st.update(state="pornește", started=time.time(), last_progress=time.time(), fps=0, speed="", frame=0, ot=0)
             try:
@@ -675,6 +777,8 @@ class H(BaseHTTPRequestHandler):
                     r = RELAYS.get(c["id"])
                     st["clients"] = [{"ip": inf["ip"], "since": int(time.time() - inf["t"])} for _, inf in r.clients.values()] if r else []
                     st["outs"] = [dict(sc.st) for sc in r.sidecars] if r else []
+                    st["pids"] = RESOLVED.get(c["id"]) or resolve_pids(c)
+                    st.pop("src", None)
                     live = r and time.time() - r.last < 5
                     st["bitrate"] = (f"{r.rate/1000:.2f} Mb/s" if r.rate >= 1000 else f"{r.rate:.0f} kb/s") if live else "—"
                     chs.append({"id": c["id"], "name": c["name"], "enabled": c["enabled"], "st": st,
@@ -689,7 +793,8 @@ class H(BaseHTTPRequestHandler):
             if not ch: return self.send(404, {"error": "nu există"})
             if m.group(2) == "log":
                 w = WORKERS.get(ch["id"]); return self.send(200, {"log": list(w.log) if w else []})
-            return self.send(200, {"cmd": shlex.join(build_cmd(ch, idx))})
+            w = WORKERS.get(ch["id"])
+            return self.send(200, {"cmd": shlex.join(build_cmd(ch, idx, w.st.get("src") if w else None, store=False))})
         return self.send(404, {"error": "?"})
 
     def do_POST(self):
@@ -702,13 +807,29 @@ class H(BaseHTTPRequestHandler):
         if p == "/logout":
             return self.send(200, {"ok": True}, extra={"Set-Cookie": "ntsenc_sid=; Path=/; Max-Age=0"})
         if not self.authed(): return self.send(401, {"error": "auth"})
+        if p == "/api/probe":
+            i = deep_merge(default_channel()["input"], b.get("input") or {})
+            if i["type"] != "url": return self.send(200, {"error": "Analiza PID merge doar pentru surse de rețea"})
+            w = WORKERS.get(b.get("id") or "")
+            ch, _ = find_channel(b.get("id") or "")
+            running = w and w.want and ch and ch["input"].get("url", "").strip() == i["url"].strip()
+            res = probe_source(input_url(i))
+            if res.get("error") and running:
+                if w.st.get("src"):
+                    res = dict(w.st["src"]); res["note"] = "Canalul rulează — afișez analiza făcută la pornire."
+                elif "already in use" in res["error"]:
+                    res["error"] = "Sursa unicast e deja citită de canalul pornit, deci nu poate fi analizată în paralel. Oprește canalul, sau pune modul „Originale din sursă” (analiza se face la pornire). Sursele multicast pot fi analizate oricând."
+            return self.send(200, res)
         if p == "/api/preview_cmd":
             ch = deep_merge(default_channel(), b)
             _, idx = find_channel(ch["id"])
             if idx < 0: idx = len(CFG["channels"])
-            return self.send(200, {"cmd": shlex.join(build_cmd(ch, idx))})
+            pr = resolve_pids(ch)
+            return self.send(200, {"cmd": shlex.join(build_cmd(ch, idx, store=False)), "pid_error": check_pids(pr)})
         if p == "/api/channel":
             ch = deep_merge(default_channel(), b)
+            perr = check_pids(resolve_pids(ch))
+            if perr and ch["ts"].get("pid_mode") != "source": return self.send(400, {"error": perr})
             with LOCK:
                 ex, _ = find_channel(ch["id"])
                 used = {c.get("lport") for c in CFG["channels"] if c["id"] != ch["id"]}
@@ -931,16 +1052,21 @@ h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08e
 </div><p class="hint">Pentru ieșirea RTMP audio-ul e convertit automat în AAC (dacă nu e deja AAC), deci poți păstra MP2 pe multicast.</p></div>
 
 <div class="pane" data-tab="MPEG-TS"><div class="fg">
+  <label class="f w2">Mod PID<select data-k="ts.pid_mode" onchange="pidMode()"><option value="manual">Manual (PID-urile de mai jos)</option><option value="source">Originale din sursă (SID, PMT, video, audio)</option></select></label>
+  <label class="f" style="justify-content:flex-end"><button type="button" onclick="probeSrc()">Analizează sursa</button></label>
+  <div class="w3" id="probeBox"></div>
   <label class="f">Service ID (program)<input type="number" data-k="ts.service_id" data-t="n"></label>
   <label class="f">Service name<input data-k="ts.service_name" placeholder="= numele canalului"></label>
   <label class="f">Provider<input data-k="ts.provider"></label>
   <label class="f">PMT PID<input type="number" data-k="ts.pmt_pid" data-t="n"></label>
   <label class="f">Video PID<input type="number" data-k="ts.video_pid" data-t="n"></label>
   <label class="f">Audio PID (prima)<input type="number" data-k="ts.audio_pid" data-t="n"></label>
+  <label class="f w2">PID-uri audio pe piste (opțional)<input data-k="ts.audio_pids" placeholder="ex. 257, 258, 259  ·  gol = consecutive de la prima"></label>
   <label class="f">Muxrate CBR (kbps, 0=VBR)<input type="number" data-k="ts.muxrate" data-t="n"></label>
   <label class="f">PCR period (ms)<input type="number" data-k="ts.pcr_period" data-t="n"></label>
   <label class="f" style="justify-content:flex-end"><button type="button" onclick="autoMux()">Calculează muxrate</button></label>
-</div><p class="hint">Muxrate CBR umple cu pachete NULL până la o rată fixă — cum cer modulatoarele DVB-C/T și headend-urile IPTV. Regula: video + audio + ~10% overhead.</p></div>
+</div><p class="hint">Muxrate CBR umple cu pachete NULL până la o rată fixă — cum cer modulatoarele DVB-C/T și headend-urile IPTV. Regula: video + audio + ~10% overhead.<br>
+<b>Originale din sursă</b>: la fiecare pornire sursa e analizată și ieșirea primește exact SID-ul, PMT-ul și PID-urile video/audio ale programului ales (sau ale primului program cu video). Dacă analiza eșuează, se folosesc valorile manuale. PID-urile permise sunt 16–8190, fără duplicate. FFmpeg pune PCR pe PID-ul video.</p></div>
 
 <div class="pane" data-tab="Ieșiri"><div class="fg">
   <label class="f w2">UDP multicast (una pe linie)<textarea data-k="out.udp" placeholder="udp://239.1.1.1:1234"></textarea></label>
@@ -992,11 +1118,12 @@ async function refresh(){
   g.innerHTML=STATE.channels.map(c=>{const st=c.st,sm=c.summary;
     const led={'rulează':'run','pornește':'start','eroare':'err'}[st.state]||'';
     const br=st.bitrate;
-    return `<div class="card"><div class="top"><span class="led ${led}"></span><h3>${esc(c.name)}</h3><span class="tag">SID ${sm.sid}</span><span class="tag">${esc(st.state)}</span></div>
+    return `<div class="card"><div class="top"><span class="led ${led}"></span><h3>${esc(c.name)}</h3><span class="tag">SID ${st.pids?st.pids.sid:sm.sid}</span><span class="tag">${esc(st.state)}</span></div>
     <div class="stats"><div><span>FPS</span><b>${st.fps||'—'}</b></div><div><span>Bitrate</span><b>${br||'—'}</b></div><div><span>Viteză</span><b>${st.speed||'—'}</b></div><div><span>Uptime</span><b>${dur(st.running_for)}</b></div></div>
     <div class="info"><div>Sursă: <code>${esc(sm.src)}</code></div><div>Video: <code>${esc(sm.video)}</code> · Audio: <code>${esc(sm.audio)}</code>${sm.muxrate?` · CBR <code>${sm.muxrate}k</code>`:''}</div>
     <div>Ieșiri: <code>${esc(sm.outs.filter(x=>x.startsWith('udp')).join('  ·  ')||'—')}</code>${sm.httpts?' · <code>HTTP-TS</code>':''}</div>
     ${(st.outs||[]).map(o=>`<div><span class="led ${o.state=='activ'?'run':o.state=='eroare'?'err':''}" style="display:inline-block;width:7px;height:7px;margin-right:6px"></span>${o.kind}: <code>${esc(o.target||'/hls/'+c.id+'/index.m3u8')}</code>${o.restarts?` · reconectări ${o.restarts}`:''}${o.state=='eroare'&&o.err?`<div class="errbox" style="margin:4px 0 0">${esc(o.err)}</div>`:''}</div>`).join('')}
+    ${st.pids?`<div>PID: <code>SID ${st.pids.sid} · PMT ${st.pids.pmt} · V ${st.pids.vpid}${(st.pids.show||[]).length?' · A '+st.pids.show.join(','):''}</code>${st.pids.mode=='sursă'?' <span class="tag">din sursă</span>':''}</div>`:''}
     <div>Reporniri: <code>${st.restarts||0}</code> · Drop/Dup: <code>${st.drop||0}/${st.dup||0}</code>${st.clients&&st.clients.length?` · Clienți HTTP: <code>${st.clients.map(x=>x.ip).join(', ')}</code>`:''}</div></div>
     ${st.state=='eroare'&&st.last_err?`<div class="errbox">${esc(st.last_err)}</div>`:''}
     <div class="bot">${c.enabled?`<button class="sm red" onclick="act('${c.id}','stop')">■ Stop</button><button class="sm" onclick="act('${c.id}','restart')">↻ Restart</button>`:`<button class="sm grn" onclick="act('${c.id}','start')">▶ Start</button>`}
@@ -1020,13 +1147,33 @@ async function editCh(id){
   $('#eTitle').textContent=id?'Editează: '+CH.name:'Canal nou';$('#bDel').style.display=id?'':'none';
   for(const el of $$('[data-k]')){const v=getK(CH,el.dataset.k);
     if(el.type=='checkbox')el.checked=!!v;else{if(el.tagName=='SELECT'&&v!=null&&![...el.options].some(o=>o.value==String(v)))el.add(new Option(v,v));el.value=v??''}}
-  inType();tab('General');dEdit.showModal()}
+  $('#probeBox').innerHTML='';inType();pidMode();tab('General');dEdit.showModal()}
 function collect(){for(const el of $$('[data-k]')){let v=el.type=='checkbox'?el.checked:el.value;if(el.dataset.t=='n')v=Number(v)||0;setK(CH,el.dataset.k,v)}return CH}
+function pidMode(){const src=$('[data-k="ts.pid_mode"]').value=='source';
+  ['ts.service_id','ts.pmt_pid','ts.video_pid','ts.audio_pid','ts.audio_pids'].forEach(k=>{const e=$(`[data-k="${k}"]`);e.disabled=src;e.style.opacity=src?.45:1})}
+async function probeSrc(){collect();const b=$('#probeBox');
+  if(CH.input.type!='url'){b.innerHTML='<p class="hint">Analiza PID merge doar pentru surse de rețea.</p>';return}
+  b.innerHTML='<p class="hint">Analizez <code>'+esc(CH.input.url)+'</code>…</p>';
+  const j=await api('/api/probe',{input:CH.input,id:CH.id}).catch(e=>({error:e.message}));
+  if(j.error){b.innerHTML='<div class="errbox" style="margin:0">'+esc(j.error)+'</div>';return}
+  window.PROBE=j;
+  b.innerHTML=(j.note?`<p class="hint" style="margin:0 0 8px">${esc(j.note)}</p>`:'')+j.programs.map((p,n)=>`<div class="dev"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>Program ${p.program_id}</b>${p.name?` — ${esc(p.name)}`:''}${p.provider?` <span class="tag">${esc(p.provider)}</span>`:''}
+    <span class="tag">PMT ${p.pmt_pid}</span><span class="tag">PCR ${p.pcr_pid}</span><span style="flex:1"></span><button type="button" class="sm" onclick="usePids(${n})">Folosește aceste PID-uri</button></div>
+    <table style="width:100%;margin-top:8px;font:12px var(--mono);border-collapse:collapse">${p.streams.map(s=>`<tr style="border-top:1px solid var(--line)"><td style="padding:4px 0;width:70px">${s.pid} <span style="color:var(--mut)">0x${s.pid.toString(16)}</span></td><td style="width:60px;color:var(--mut)">${s.type}</td><td>${esc(s.codec)}</td><td style="width:50px">${esc(s.lang)}</td></tr>`).join('')}</table></div>`).join('')}
+function usePids(n){const p=PROBE.programs[n],v=p.streams.find(s=>s.type=='video'),a=p.streams.filter(s=>s.type=='audio');
+  const set=(k,val)=>{const e=$(`[data-k="${k}"]`);if(e&&val!=null)e.value=val};
+  set('ts.pid_mode','manual');pidMode();
+  if(p.program_id)set('ts.service_id',p.program_id);if(p.pmt_pid)set('ts.pmt_pid',p.pmt_pid);
+  if(v)set('ts.video_pid',v.pid);if(a.length){set('ts.audio_pid',a[0].pid);set('ts.audio_pids',a.map(s=>s.pid).join(', '))}
+  if(p.name&&!$('[data-k="ts.service_name"]').value)set('ts.service_name',p.name);
+  if(PROBE.programs.length>1&&p.program_id)set('input.program',p.program_id);
+  toast('PID-uri copiate în câmpuri')}
 function autoMux(){collect();const a=CH.audio.codec=='none'?0:CH.audio.bitrate*(CH.input.all_audio?2:1);$('[data-k="ts.muxrate"]').value=Math.ceil(((CH.video.bitrate+a)*1.1+150)/100)*100}
 async function saveCh(){try{await api('/api/channel',collect());dEdit.close();toast('Salvat — se aplică');DEV=null;setTimeout(refresh,500)}catch(e){alert(e.message)}}
 async function delCh(){if(!confirm('Ștergi canalul '+CH.name+'?'))return;await api(`/api/channel/${CH.id}/delete`,{});dEdit.close();refresh()}
 async function showCmd(){const j=await api('/api/preview_cmd',collect());clearInterval(logT);
-  $('#lTitle').textContent='Comanda FFmpeg (previzualizare, nesalvat)';$('#logBox').textContent=j.cmd;dLog.showModal()}
+  $('#lTitle').textContent='Comanda FFmpeg (previzualizare, nesalvat)';
+  $('#logBox').textContent=(j.pid_error?'!! '+j.pid_error+'\n\n':'')+(CH.ts.pid_mode=='source'?'# PID-urile din sursă se aplică la pornire (aici apar cele manuale)\n\n':'')+j.cmd;dLog.showModal()}
 let logT=null;async function showLog(id,n){$('#lTitle').textContent='Jurnal: '+n;const f=async()=>{const j=await api(`/api/channel/${id}/log`);const b=$('#logBox');const end=b.scrollHeight-b.scrollTop-b.clientHeight<40;b.textContent=j.log.join('\n')||'(gol)';if(end)b.scrollTop=1e9};
   await f();dLog.showModal();clearInterval(logT);logT=setInterval(()=>dLog.open?f():clearInterval(logT),2000)}
 async function preview(id,n,isH,isT){CFG=await api('/api/config');$('#pTitle').textContent=n;const v=$('#vid');const base=location.origin;

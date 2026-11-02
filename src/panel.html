@@ -116,16 +116,21 @@ h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08e
 </div><p class="hint">Pentru ieșirea RTMP audio-ul e convertit automat în AAC (dacă nu e deja AAC), deci poți păstra MP2 pe multicast.</p></div>
 
 <div class="pane" data-tab="MPEG-TS"><div class="fg">
+  <label class="f w2">Mod PID<select data-k="ts.pid_mode" onchange="pidMode()"><option value="manual">Manual (PID-urile de mai jos)</option><option value="source">Originale din sursă (SID, PMT, video, audio)</option></select></label>
+  <label class="f" style="justify-content:flex-end"><button type="button" onclick="probeSrc()">Analizează sursa</button></label>
+  <div class="w3" id="probeBox"></div>
   <label class="f">Service ID (program)<input type="number" data-k="ts.service_id" data-t="n"></label>
   <label class="f">Service name<input data-k="ts.service_name" placeholder="= numele canalului"></label>
   <label class="f">Provider<input data-k="ts.provider"></label>
   <label class="f">PMT PID<input type="number" data-k="ts.pmt_pid" data-t="n"></label>
   <label class="f">Video PID<input type="number" data-k="ts.video_pid" data-t="n"></label>
   <label class="f">Audio PID (prima)<input type="number" data-k="ts.audio_pid" data-t="n"></label>
+  <label class="f w2">PID-uri audio pe piste (opțional)<input data-k="ts.audio_pids" placeholder="ex. 257, 258, 259  ·  gol = consecutive de la prima"></label>
   <label class="f">Muxrate CBR (kbps, 0=VBR)<input type="number" data-k="ts.muxrate" data-t="n"></label>
   <label class="f">PCR period (ms)<input type="number" data-k="ts.pcr_period" data-t="n"></label>
   <label class="f" style="justify-content:flex-end"><button type="button" onclick="autoMux()">Calculează muxrate</button></label>
-</div><p class="hint">Muxrate CBR umple cu pachete NULL până la o rată fixă — cum cer modulatoarele DVB-C/T și headend-urile IPTV. Regula: video + audio + ~10% overhead.</p></div>
+</div><p class="hint">Muxrate CBR umple cu pachete NULL până la o rată fixă — cum cer modulatoarele DVB-C/T și headend-urile IPTV. Regula: video + audio + ~10% overhead.<br>
+<b>Originale din sursă</b>: la fiecare pornire sursa e analizată și ieșirea primește exact SID-ul, PMT-ul și PID-urile video/audio ale programului ales (sau ale primului program cu video). Dacă analiza eșuează, se folosesc valorile manuale. PID-urile permise sunt 16–8190, fără duplicate. FFmpeg pune PCR pe PID-ul video.</p></div>
 
 <div class="pane" data-tab="Ieșiri"><div class="fg">
   <label class="f w2">UDP multicast (una pe linie)<textarea data-k="out.udp" placeholder="udp://239.1.1.1:1234"></textarea></label>
@@ -177,11 +182,12 @@ async function refresh(){
   g.innerHTML=STATE.channels.map(c=>{const st=c.st,sm=c.summary;
     const led={'rulează':'run','pornește':'start','eroare':'err'}[st.state]||'';
     const br=st.bitrate;
-    return `<div class="card"><div class="top"><span class="led ${led}"></span><h3>${esc(c.name)}</h3><span class="tag">SID ${sm.sid}</span><span class="tag">${esc(st.state)}</span></div>
+    return `<div class="card"><div class="top"><span class="led ${led}"></span><h3>${esc(c.name)}</h3><span class="tag">SID ${st.pids?st.pids.sid:sm.sid}</span><span class="tag">${esc(st.state)}</span></div>
     <div class="stats"><div><span>FPS</span><b>${st.fps||'—'}</b></div><div><span>Bitrate</span><b>${br||'—'}</b></div><div><span>Viteză</span><b>${st.speed||'—'}</b></div><div><span>Uptime</span><b>${dur(st.running_for)}</b></div></div>
     <div class="info"><div>Sursă: <code>${esc(sm.src)}</code></div><div>Video: <code>${esc(sm.video)}</code> · Audio: <code>${esc(sm.audio)}</code>${sm.muxrate?` · CBR <code>${sm.muxrate}k</code>`:''}</div>
     <div>Ieșiri: <code>${esc(sm.outs.filter(x=>x.startsWith('udp')).join('  ·  ')||'—')}</code>${sm.httpts?' · <code>HTTP-TS</code>':''}</div>
     ${(st.outs||[]).map(o=>`<div><span class="led ${o.state=='activ'?'run':o.state=='eroare'?'err':''}" style="display:inline-block;width:7px;height:7px;margin-right:6px"></span>${o.kind}: <code>${esc(o.target||'/hls/'+c.id+'/index.m3u8')}</code>${o.restarts?` · reconectări ${o.restarts}`:''}${o.state=='eroare'&&o.err?`<div class="errbox" style="margin:4px 0 0">${esc(o.err)}</div>`:''}</div>`).join('')}
+    ${st.pids?`<div>PID: <code>SID ${st.pids.sid} · PMT ${st.pids.pmt} · V ${st.pids.vpid}${(st.pids.show||[]).length?' · A '+st.pids.show.join(','):''}</code>${st.pids.mode=='sursă'?' <span class="tag">din sursă</span>':''}</div>`:''}
     <div>Reporniri: <code>${st.restarts||0}</code> · Drop/Dup: <code>${st.drop||0}/${st.dup||0}</code>${st.clients&&st.clients.length?` · Clienți HTTP: <code>${st.clients.map(x=>x.ip).join(', ')}</code>`:''}</div></div>
     ${st.state=='eroare'&&st.last_err?`<div class="errbox">${esc(st.last_err)}</div>`:''}
     <div class="bot">${c.enabled?`<button class="sm red" onclick="act('${c.id}','stop')">■ Stop</button><button class="sm" onclick="act('${c.id}','restart')">↻ Restart</button>`:`<button class="sm grn" onclick="act('${c.id}','start')">▶ Start</button>`}
@@ -205,13 +211,33 @@ async function editCh(id){
   $('#eTitle').textContent=id?'Editează: '+CH.name:'Canal nou';$('#bDel').style.display=id?'':'none';
   for(const el of $$('[data-k]')){const v=getK(CH,el.dataset.k);
     if(el.type=='checkbox')el.checked=!!v;else{if(el.tagName=='SELECT'&&v!=null&&![...el.options].some(o=>o.value==String(v)))el.add(new Option(v,v));el.value=v??''}}
-  inType();tab('General');dEdit.showModal()}
+  $('#probeBox').innerHTML='';inType();pidMode();tab('General');dEdit.showModal()}
 function collect(){for(const el of $$('[data-k]')){let v=el.type=='checkbox'?el.checked:el.value;if(el.dataset.t=='n')v=Number(v)||0;setK(CH,el.dataset.k,v)}return CH}
+function pidMode(){const src=$('[data-k="ts.pid_mode"]').value=='source';
+  ['ts.service_id','ts.pmt_pid','ts.video_pid','ts.audio_pid','ts.audio_pids'].forEach(k=>{const e=$(`[data-k="${k}"]`);e.disabled=src;e.style.opacity=src?.45:1})}
+async function probeSrc(){collect();const b=$('#probeBox');
+  if(CH.input.type!='url'){b.innerHTML='<p class="hint">Analiza PID merge doar pentru surse de rețea.</p>';return}
+  b.innerHTML='<p class="hint">Analizez <code>'+esc(CH.input.url)+'</code>…</p>';
+  const j=await api('/api/probe',{input:CH.input,id:CH.id}).catch(e=>({error:e.message}));
+  if(j.error){b.innerHTML='<div class="errbox" style="margin:0">'+esc(j.error)+'</div>';return}
+  window.PROBE=j;
+  b.innerHTML=(j.note?`<p class="hint" style="margin:0 0 8px">${esc(j.note)}</p>`:'')+j.programs.map((p,n)=>`<div class="dev"><div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><b>Program ${p.program_id}</b>${p.name?` — ${esc(p.name)}`:''}${p.provider?` <span class="tag">${esc(p.provider)}</span>`:''}
+    <span class="tag">PMT ${p.pmt_pid}</span><span class="tag">PCR ${p.pcr_pid}</span><span style="flex:1"></span><button type="button" class="sm" onclick="usePids(${n})">Folosește aceste PID-uri</button></div>
+    <table style="width:100%;margin-top:8px;font:12px var(--mono);border-collapse:collapse">${p.streams.map(s=>`<tr style="border-top:1px solid var(--line)"><td style="padding:4px 0;width:70px">${s.pid} <span style="color:var(--mut)">0x${s.pid.toString(16)}</span></td><td style="width:60px;color:var(--mut)">${s.type}</td><td>${esc(s.codec)}</td><td style="width:50px">${esc(s.lang)}</td></tr>`).join('')}</table></div>`).join('')}
+function usePids(n){const p=PROBE.programs[n],v=p.streams.find(s=>s.type=='video'),a=p.streams.filter(s=>s.type=='audio');
+  const set=(k,val)=>{const e=$(`[data-k="${k}"]`);if(e&&val!=null)e.value=val};
+  set('ts.pid_mode','manual');pidMode();
+  if(p.program_id)set('ts.service_id',p.program_id);if(p.pmt_pid)set('ts.pmt_pid',p.pmt_pid);
+  if(v)set('ts.video_pid',v.pid);if(a.length){set('ts.audio_pid',a[0].pid);set('ts.audio_pids',a.map(s=>s.pid).join(', '))}
+  if(p.name&&!$('[data-k="ts.service_name"]').value)set('ts.service_name',p.name);
+  if(PROBE.programs.length>1&&p.program_id)set('input.program',p.program_id);
+  toast('PID-uri copiate în câmpuri')}
 function autoMux(){collect();const a=CH.audio.codec=='none'?0:CH.audio.bitrate*(CH.input.all_audio?2:1);$('[data-k="ts.muxrate"]').value=Math.ceil(((CH.video.bitrate+a)*1.1+150)/100)*100}
 async function saveCh(){try{await api('/api/channel',collect());dEdit.close();toast('Salvat — se aplică');DEV=null;setTimeout(refresh,500)}catch(e){alert(e.message)}}
 async function delCh(){if(!confirm('Ștergi canalul '+CH.name+'?'))return;await api(`/api/channel/${CH.id}/delete`,{});dEdit.close();refresh()}
 async function showCmd(){const j=await api('/api/preview_cmd',collect());clearInterval(logT);
-  $('#lTitle').textContent='Comanda FFmpeg (previzualizare, nesalvat)';$('#logBox').textContent=j.cmd;dLog.showModal()}
+  $('#lTitle').textContent='Comanda FFmpeg (previzualizare, nesalvat)';
+  $('#logBox').textContent=(j.pid_error?'!! '+j.pid_error+'\n\n':'')+(CH.ts.pid_mode=='source'?'# PID-urile din sursă se aplică la pornire (aici apar cele manuale)\n\n':'')+j.cmd;dLog.showModal()}
 let logT=null;async function showLog(id,n){$('#lTitle').textContent='Jurnal: '+n;const f=async()=>{const j=await api(`/api/channel/${id}/log`);const b=$('#logBox');const end=b.scrollHeight-b.scrollTop-b.clientHeight<40;b.textContent=j.log.join('\n')||'(gol)';if(end)b.scrollTop=1e9};
   await f();dLog.showModal();clearInterval(logT);logT=setInterval(()=>dLog.open?f():clearInterval(logT),2000)}
 async function preview(id,n,isH,isT){CFG=await api('/api/config');$('#pTitle').textContent=n;const v=$('#vid');const base=location.origin;

@@ -25,7 +25,8 @@ sudo bash install-ntsenc.sh uninstall
 | **Intrări** | Plăci HDMI/SDI (V4L2 + audio ALSA) · UDP/RTP multicast · SRT · RTMP · HTTP-TS · HLS · selecție program (SID) · toate pistele audio |
 | **Video** | H.264 / HEVC pe GPU (VAAPI sau QSV), decodare HW, deinterlace + scalare pe GPU · MPEG-2 / x264 pe CPU · copy |
 | **Audio** | MP2 (broadcast) · AAC · AC-3 · copy |
-| **MPEG-TS** | Muxrate CBR cu pachete NULL · Service ID · service name / provider · PID PMT / video / audio · PCR period |
+| **MPEG-TS** | Muxrate CBR cu pachete NULL · Service ID · service name / provider · PCR period |
+| **PID-uri** | Manual (PMT, video, câte un PID pe fiecare pistă audio, zecimal sau `0x…`) sau **originale din sursă** (SID, PMT, video, audio copiate automat la fiecare pornire) · analiză sursă cu programe, PID-uri, codecuri și limbi · validare 16–8190 fără duplicate |
 | **Ieșiri** | UDP multicast (mai multe, TTL, interfață) · SRT · RTMP · HLS · HTTP-TS · token opțional pe `/ts` și `/hls` |
 | **Monitorizare** | FPS, bitrate real de ieșire, viteză, uptime, reporniri, drop/dup, jurnal live, comanda FFmpeg, previzualizare HLS, CPU/RAM/temp/GPU/rețea |
 
@@ -48,6 +49,16 @@ Watchdog: dacă un canal nu mai produce cadre timp de 30 s, e repornit automat.
 - Intel N100/N200/N305 și Gen 11+ au adesea doar encoder **low-power** (VDENC). Dacă apare „No usable encoding entrypoint”, setează **Low-power = da** în tab-ul Video. Instalatorul îți spune la final ce profile de encodare are GPU-ul.
 - Dacă iGPU-ul apare ca `renderD129`, schimbă dispozitivul VAAPI din **Setări**.
 - RTMP nu acceptă HEVC — folosește H.264 dacă trimiți pe RTMP.
+
+## PID-uri
+
+În tab-ul **MPEG-TS** al canalului:
+
+- **Manual**: setezi SID, PMT PID, video PID și PID-urile audio. Pentru mai multe piste scrii lista în *PID-uri audio pe piste*, de ex. `257, 258, 259`.
+- **Originale din sursă**: la pornire sursa e analizată, iar ieșirea primește exact SID-ul, PMT-ul și PID-urile video/audio ale programului ales din *Intrare → Program* (sau ale primului program cu video). Dacă analiza eșuează, se folosesc valorile manuale.
+- **Analizează sursa** afișează programele, PID-urile, codecurile și limbile sursei. Cu **Folosește aceste PID-uri** le copiezi în câmpurile manuale.
+
+PID-urile se păstrează pe toate ieșirile: UDP, HTTP-TS, SRT și HLS. FFmpeg pune PCR-ul pe PID-ul video.
 
 ## Multicast
 
