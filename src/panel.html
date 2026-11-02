@@ -53,6 +53,15 @@ video{width:100%;background:#000;border-radius:8px;aspect-ratio:16/9}
 .dev{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:8px}
 .dev summary{cursor:pointer}.dev pre{font:11.5px var(--mono);white-space:pre-wrap;color:var(--mut);max-height:240px;overflow:auto}
 h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
+.pids{margin:0 14px 12px;border-top:1px solid var(--line)}
+.pids h5{margin:10px 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:600}
+.pids table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}
+.pids th{text-align:left;font:600 11px system-ui,sans-serif;color:var(--mut);padding:5px 4px;border-bottom:1px solid var(--line)}
+.pids td{padding:5px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+.pids td.r,.pids th.r{text-align:right}.pids .dec{color:var(--mut);margin-left:6px}
+.pids .k-video{color:#60a5fa}.pids .k-audio{color:#c084fc}.pids .k-psi{color:var(--mut)}.pids .k-data{color:#fbbf24}
+.pids .pcr{font-size:10px;border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:5px;color:var(--mut)}
+button.on{border-color:var(--tx)}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:9px;font-weight:600;opacity:0;transition:.25s;pointer-events:none;z-index:99}
 .toast.on{opacity:1}
 </style></head><body>
@@ -190,10 +199,21 @@ async function refresh(){
     ${st.pids?`<div>PID: <code>SID ${st.pids.sid} · PMT ${st.pids.pmt} · V ${st.pids.vpid}${(st.pids.show||[]).length?' · A '+st.pids.show.join(','):''}</code>${st.pids.mode=='sursă'?' <span class="tag">din sursă</span>':''}</div>`:''}
     <div>Reporniri: <code>${st.restarts||0}</code> · Drop/Dup: <code>${st.drop||0}/${st.dup||0}</code>${st.clients&&st.clients.length?` · Clienți HTTP: <code>${st.clients.map(x=>x.ip).join(', ')}</code>`:''}</div></div>
     ${st.state=='eroare'&&st.last_err?`<div class="errbox">${esc(st.last_err)}</div>`:''}
+    ${OPEN.has(c.id)?`<div class="pids" id="pids-${c.id}">${pidTable(PIDS[c.id])}</div>`:''}
     <div class="bot">${c.enabled?`<button class="sm red" onclick="act('${c.id}','stop')">■ Stop</button><button class="sm" onclick="act('${c.id}','restart')">↻ Restart</button>`:`<button class="sm grn" onclick="act('${c.id}','start')">▶ Start</button>`}
-    <button class="sm" onclick="editCh('${c.id}')">Editează</button><button class="sm" onclick="showLog('${c.id}','${esc(c.name)}')">Jurnal</button>
+    <button class="sm" onclick="editCh('${c.id}')">Editează</button><button class="sm" onclick="showLog('${c.id}','${esc(c.name)}')">Jurnal</button><button class="sm ${OPEN.has(c.id)?'on':''}" onclick="togglePids('${c.id}')">PID-uri</button>
     ${sm.hls||sm.httpts?`<button class="sm" onclick="preview('${c.id}','${esc(c.name)}',${sm.hls},${sm.httpts})">Previzualizare</button>`:''}</div></div>`}).join('');
 }
+const OPEN=new Set(),PIDS={};
+const fmtR=b=>b>=1e6?(b/1e6).toFixed(2)+' Mb/s':Math.round(b/1e3)+' kb/s';
+function pidTable(d){if(!d)return'<h5>PID-uri ieșire</h5><p class="hint" style="margin:0 0 6px">Se încarcă…</p>';
+  if(!d.rows.length)return'<h5>PID-uri ieșire</h5><p class="hint" style="margin:0 0 6px">Canalul nu trimite date.</p>';
+  const pg=d.programs.map(p=>`${esc(p.name)}${p.provider?' · '+esc(p.provider):''} <span style="opacity:.6">(SID ${p.sid})</span>`).join(' / ');
+  return `<h5>PID-uri ieșire${pg?' · '+pg:''}</h5><table><tr><th>PID</th><th>Tip</th><th>Limbă</th><th class="r">Bitrate</th></tr>`+
+   d.rows.map(r=>`<tr><td>0x${r.pid.toString(16).toUpperCase().padStart(4,'0')}<span class="dec">${r.pid}</span></td><td class="k-${r.kind}">${esc(r.type)}${r.pcr?'<span class="pcr">PCR</span>':''}</td><td>${esc(r.lang)}</td><td class="r">${fmtR(r.rate)}</td></tr>`).join('')+
+   `<tr><td colspan="3" style="color:var(--mut)">Total</td><td class="r"><b>${fmtR(d.total)}</b></td></tr></table>`}
+function togglePids(id){OPEN.has(id)?OPEN.delete(id):OPEN.add(id);refresh().then(loadPids)}
+async function loadPids(){for(const id of OPEN){try{PIDS[id]=await api(`/api/channel/${id}/pids`);const e=$('#pids-'+id);if(e)e.innerHTML=pidTable(PIDS[id])}catch(e){}}}
 async function act(id,a){await api(`/api/channel/${id}/${a}`,{});toast({start:'Pornit',stop:'Oprit',restart:'Repornire…'}[a]);setTimeout(refresh,600)}
 
 const getK=(o,k)=>k.split('.').reduce((a,b)=>a?.[b],o);
@@ -255,5 +275,5 @@ async function openDevices(){dDev.showModal();DEV=null;$('#devBody').textContent
   $('#devBody').innerHTML=h}
 async function openSettings(){CFG=await api('/api/config');sUser.value=CFG.user;sPort.value=CFG.port;sDev.value=CFG.vaapi_device;sTok.value=CFG.stream_token||'';sOld.value=sNew.value='';dSet.showModal()}
 async function saveSet(){try{await api('/api/settings',{user:sUser.value,port:+sPort.value,vaapi_device:sDev.value,stream_token:sTok.value,oldpass:sOld.value,newpass:sNew.value});dSet.close();toast('Setări salvate')}catch(e){alert(e.message)}}
-api('/api/config').then(c=>CFG=c);refresh();setInterval(refresh,2000);
+api('/api/config').then(c=>CFG=c);refresh();setInterval(()=>refresh().then(loadPids),2000);
 </script></body></html>

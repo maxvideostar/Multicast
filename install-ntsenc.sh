@@ -461,11 +461,112 @@ def relay_sig(ch, port):
     return json.dumps([port, o.get("srt"), o.get("rtmp"), o.get("hls"), o.get("hls_time"), o.get("hls_list"),
                        ch["ts"], ch["audio"]["codec"], ch["name"]], sort_keys=True)
 
+STREAM_TYPES = {0x01: "MPEG-1 Video", 0x02: "MPEG-2 Video", 0x03: "MPEG-1 Audio", 0x04: "MPEG-2 Audio",
+                0x0F: "AAC", 0x11: "AAC LATM", 0x15: "Metadata", 0x1B: "H.264", 0x24: "HEVC", 0x33: "VVC",
+                0x81: "AC-3", 0x87: "E-AC-3", 0x86: "SCTE-35"}
+
+class TsAnalyzer:
+    """Analiză live a TS-ului de ieșire: PID-uri, tip, limbă, bitrate, serviciu (fără CC)."""
+    def __init__(self):
+        self.bytes = collections.Counter(); self.rates = {}; self.t0 = time.time(); self.lock = threading.Lock()
+        self.pmt_pids = {}      # pmt_pid -> program
+        self.es = {}            # pid -> {"type", "lang", "prog"}
+        self.pcr = {}           # program -> pcr pid
+        self.svc = {}           # program -> (name, provider)
+        self.psi_t = {}         # pid -> ultima parsare
+    def feed(self, data):
+        n = len(data) - len(data) % 188
+        cnt = self.bytes
+        for off in range(0, n, 188):
+            if data[off] != 0x47: continue
+            pid = ((data[off + 1] & 0x1F) << 8) | data[off + 2]
+            cnt[pid] += 188
+            if (pid == 0 or pid == 0x11 or pid in self.pmt_pids) and data[off + 1] & 0x40:
+                now = time.time()
+                if now - self.psi_t.get(pid, 0) > 2:
+                    self.psi_t[pid] = now
+                    try: self.psi(pid, data[off:off + 188])
+                    except Exception: pass
+        now = time.time()
+        if now - self.t0 >= 2:
+            with self.lock:
+                dt = now - self.t0
+                self.rates = {k: v * 8 / dt for k, v in cnt.items()}
+                self.bytes = collections.Counter(); self.t0 = now
+    def psi(self, pid, pkt):
+        afc = (pkt[3] >> 4) & 3
+        i = 4 + (1 + pkt[4] if afc & 2 else 0)
+        if not afc & 1: return
+        i += 1 + pkt[i]                      # pointer_field
+        tid = pkt[i]; slen = ((pkt[i + 1] & 0x0F) << 8) | pkt[i + 2]
+        sec = pkt[i:i + 3 + slen]
+        if len(sec) < 3 + slen: return       # secțiune pe mai multe pachete — ignorăm
+        body, end = sec[8:], len(sec) - 4    # fără CRC
+        if pid == 0 and tid == 0x00:
+            pm = {}
+            for k in range(8, end, 4):
+                prog = (sec[k] << 8) | sec[k + 1]; pp = ((sec[k + 2] & 0x1F) << 8) | sec[k + 3]
+                if prog: pm[pp] = prog
+            self.pmt_pids = pm
+        elif tid == 0x02:
+            prog = (sec[3] << 8) | sec[4]
+            self.pcr[prog] = ((sec[8] & 0x1F) << 8) | sec[9]
+            k = 12 + (((sec[10] & 0x0F) << 8) | sec[11])
+            es = {p: v for p, v in self.es.items() if v["prog"] != prog}
+            while k + 5 <= end:
+                st = sec[k]; epid = ((sec[k + 1] & 0x1F) << 8) | sec[k + 2]
+                il = ((sec[k + 3] & 0x0F) << 8) | sec[k + 4]
+                desc = sec[k + 5:k + 5 + il]; lang = ""; name = STREAM_TYPES.get(st, f"Tip 0x{st:02X}")
+                d = 0
+                while d + 2 <= len(desc):
+                    tag, dl = desc[d], desc[d + 1]; dv = desc[d + 2:d + 2 + dl]
+                    if tag == 0x0A and dl >= 3: lang = dv[:3].decode("latin-1", "replace")
+                    elif st == 0x06 and tag == 0x6A: name = "AC-3"
+                    elif st == 0x06 and tag == 0x7A: name = "E-AC-3"
+                    elif st == 0x06 and tag == 0x56: name = "Teletext"
+                    elif st == 0x06 and tag == 0x59:
+                        name = "Subtitrări DVB"; lang = lang or dv[:3].decode("latin-1", "replace")
+                    d += 2 + dl
+                es[epid] = {"type": name, "lang": lang, "prog": prog}
+                k += 5 + il
+            self.es = es
+        elif pid == 0x11 and tid == 0x42:
+            k = 11
+            while k + 5 <= end:
+                sid = (sec[k] << 8) | sec[k + 1]; dl = ((sec[k + 3] & 0x0F) << 8) | sec[k + 4]
+                desc = sec[k + 5:k + 5 + dl]; d = 0
+                while d + 2 <= len(desc):
+                    if desc[d] == 0x48:
+                        pl = desc[d + 3]; prov = desc[d + 4:d + 4 + pl]; nl = desc[d + 4 + pl]
+                        name = desc[d + 5 + pl:d + 5 + pl + nl]
+                        dec = lambda b: (b[1:] if b[:1] and b[0] < 0x20 else b).decode("utf-8", "replace")
+                        self.svc[sid] = (dec(name), dec(prov))
+                    d += 2 + desc[d + 1]
+                k += 5 + dl
+    def report(self):
+        with self.lock: rates = dict(self.rates)
+        rows = []
+        for pid in sorted(rates):
+            if pid == 0: t = "PAT"
+            elif pid == 0x11: t = "SDT"
+            elif pid == 0x1FFF: t = "Null"
+            elif pid in self.pmt_pids: t = "PMT"
+            elif pid in self.es: t = self.es[pid]["type"]
+            else: t = "?"
+            kind = "video" if "Video" in t or t in ("H.264", "HEVC", "VVC") else \
+                   "audio" if "Audio" in t or t in ("AAC", "AAC LATM", "AC-3", "E-AC-3") else "psi" if t in ("PAT", "SDT", "PMT", "Null") else "data"
+            pcr = any(v == pid for v in self.pcr.values())
+            rows.append({"pid": pid, "type": t, "kind": kind, "lang": self.es.get(pid, {}).get("lang", ""),
+                         "rate": round(rates[pid]), "pcr": pcr})
+        progs = [{"sid": sid, "name": n, "provider": pv} for sid, (n, pv) in self.svc.items()]
+        return {"rows": rows, "programs": progs, "total": round(sum(rates.values()))}
+
 class TsRelay:
     def __init__(self, port, ch):
         self.port, self.clients, self.lock, self.stop_ev = port, {}, threading.Lock(), threading.Event()
         self.sig = relay_sig(ch, port); self.httpts = bool(ch["out"].get("httpts"))
         self.bytes = 0; self.last = 0; self.sidecars = []; self.rate = 0; self._rb = 0; self._rt = time.time()
+        self.ana = TsAnalyzer()
         o = ch["out"]
         for kind in ("srt", "rtmp"):
             for u in [x.strip() for x in str(o.get(kind) or "").splitlines() if x.strip()]:
@@ -491,6 +592,7 @@ class TsRelay:
             if self.last - self._rt >= 2:
                 self.rate = (self.bytes - self._rb) * 8 / (self.last - self._rt) / 1000
                 self._rb, self._rt = self.bytes, self.last
+            self.ana.feed(data)
             for sc in self.sidecars: sc.feed(data)
             if self.clients:
                 with self.lock:
@@ -787,6 +889,11 @@ class H(BaseHTTPRequestHandler):
         if p == "/api/config": return self.send(200, public_cfg())
         if p == "/api/devices": return self.send(200, devices())
         if p == "/api/new": return self.send(200, default_channel())
+        m = re.match(r"^/api/channel/([0-9a-f]+)/pids$", p)
+        if m:
+            r = RELAYS.get(m.group(1))
+            if not r or time.time() - r.last > 5: return self.send(200, {"rows": [], "programs": [], "total": 0})
+            return self.send(200, r.ana.report())
         m = re.match(r"^/api/channel/([0-9a-f]+)/(log|cmd)$", p)
         if m:
             ch, idx = find_channel(m.group(1))
@@ -989,6 +1096,15 @@ video{width:100%;background:#000;border-radius:8px;aspect-ratio:16/9}
 .dev{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:8px}
 .dev summary{cursor:pointer}.dev pre{font:11.5px var(--mono);white-space:pre-wrap;color:var(--mut);max-height:240px;overflow:auto}
 h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
+.pids{margin:0 14px 12px;border-top:1px solid var(--line)}
+.pids h5{margin:10px 0 6px;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);font-weight:600}
+.pids table{width:100%;border-collapse:collapse;font:12.5px var(--mono)}
+.pids th{text-align:left;font:600 11px system-ui,sans-serif;color:var(--mut);padding:5px 4px;border-bottom:1px solid var(--line)}
+.pids td{padding:5px 4px;border-bottom:1px solid var(--line);vertical-align:top}
+.pids td.r,.pids th.r{text-align:right}.pids .dec{color:var(--mut);margin-left:6px}
+.pids .k-video{color:#60a5fa}.pids .k-audio{color:#c084fc}.pids .k-psi{color:var(--mut)}.pids .k-data{color:#fbbf24}
+.pids .pcr{font-size:10px;border:1px solid var(--line);border-radius:4px;padding:0 4px;margin-left:5px;color:var(--mut)}
+button.on{border-color:var(--tx)}
 .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:9px;font-weight:600;opacity:0;transition:.25s;pointer-events:none;z-index:99}
 .toast.on{opacity:1}
 </style></head><body>
@@ -1126,10 +1242,21 @@ async function refresh(){
     ${st.pids?`<div>PID: <code>SID ${st.pids.sid} · PMT ${st.pids.pmt} · V ${st.pids.vpid}${(st.pids.show||[]).length?' · A '+st.pids.show.join(','):''}</code>${st.pids.mode=='sursă'?' <span class="tag">din sursă</span>':''}</div>`:''}
     <div>Reporniri: <code>${st.restarts||0}</code> · Drop/Dup: <code>${st.drop||0}/${st.dup||0}</code>${st.clients&&st.clients.length?` · Clienți HTTP: <code>${st.clients.map(x=>x.ip).join(', ')}</code>`:''}</div></div>
     ${st.state=='eroare'&&st.last_err?`<div class="errbox">${esc(st.last_err)}</div>`:''}
+    ${OPEN.has(c.id)?`<div class="pids" id="pids-${c.id}">${pidTable(PIDS[c.id])}</div>`:''}
     <div class="bot">${c.enabled?`<button class="sm red" onclick="act('${c.id}','stop')">■ Stop</button><button class="sm" onclick="act('${c.id}','restart')">↻ Restart</button>`:`<button class="sm grn" onclick="act('${c.id}','start')">▶ Start</button>`}
-    <button class="sm" onclick="editCh('${c.id}')">Editează</button><button class="sm" onclick="showLog('${c.id}','${esc(c.name)}')">Jurnal</button>
+    <button class="sm" onclick="editCh('${c.id}')">Editează</button><button class="sm" onclick="showLog('${c.id}','${esc(c.name)}')">Jurnal</button><button class="sm ${OPEN.has(c.id)?'on':''}" onclick="togglePids('${c.id}')">PID-uri</button>
     ${sm.hls||sm.httpts?`<button class="sm" onclick="preview('${c.id}','${esc(c.name)}',${sm.hls},${sm.httpts})">Previzualizare</button>`:''}</div></div>`}).join('');
 }
+const OPEN=new Set(),PIDS={};
+const fmtR=b=>b>=1e6?(b/1e6).toFixed(2)+' Mb/s':Math.round(b/1e3)+' kb/s';
+function pidTable(d){if(!d)return'<h5>PID-uri ieșire</h5><p class="hint" style="margin:0 0 6px">Se încarcă…</p>';
+  if(!d.rows.length)return'<h5>PID-uri ieșire</h5><p class="hint" style="margin:0 0 6px">Canalul nu trimite date.</p>';
+  const pg=d.programs.map(p=>`${esc(p.name)}${p.provider?' · '+esc(p.provider):''} <span style="opacity:.6">(SID ${p.sid})</span>`).join(' / ');
+  return `<h5>PID-uri ieșire${pg?' · '+pg:''}</h5><table><tr><th>PID</th><th>Tip</th><th>Limbă</th><th class="r">Bitrate</th></tr>`+
+   d.rows.map(r=>`<tr><td>0x${r.pid.toString(16).toUpperCase().padStart(4,'0')}<span class="dec">${r.pid}</span></td><td class="k-${r.kind}">${esc(r.type)}${r.pcr?'<span class="pcr">PCR</span>':''}</td><td>${esc(r.lang)}</td><td class="r">${fmtR(r.rate)}</td></tr>`).join('')+
+   `<tr><td colspan="3" style="color:var(--mut)">Total</td><td class="r"><b>${fmtR(d.total)}</b></td></tr></table>`}
+function togglePids(id){OPEN.has(id)?OPEN.delete(id):OPEN.add(id);refresh().then(loadPids)}
+async function loadPids(){for(const id of OPEN){try{PIDS[id]=await api(`/api/channel/${id}/pids`);const e=$('#pids-'+id);if(e)e.innerHTML=pidTable(PIDS[id])}catch(e){}}}
 async function act(id,a){await api(`/api/channel/${id}/${a}`,{});toast({start:'Pornit',stop:'Oprit',restart:'Repornire…'}[a]);setTimeout(refresh,600)}
 
 const getK=(o,k)=>k.split('.').reduce((a,b)=>a?.[b],o);
@@ -1191,7 +1318,7 @@ async function openDevices(){dDev.showModal();DEV=null;$('#devBody').textContent
   $('#devBody').innerHTML=h}
 async function openSettings(){CFG=await api('/api/config');sUser.value=CFG.user;sPort.value=CFG.port;sDev.value=CFG.vaapi_device;sTok.value=CFG.stream_token||'';sOld.value=sNew.value='';dSet.showModal()}
 async function saveSet(){try{await api('/api/settings',{user:sUser.value,port:+sPort.value,vaapi_device:sDev.value,stream_token:sTok.value,oldpass:sOld.value,newpass:sNew.value});dSet.close();toast('Setări salvate')}catch(e){alert(e.message)}}
-api('/api/config').then(c=>CFG=c);refresh();setInterval(refresh,2000);
+api('/api/config').then(c=>CFG=c);refresh();setInterval(()=>refresh().then(loadPids),2000);
 </script></body></html>
 NTSENC_FILE_EOF
 cat > "$APP/login.html" <<'NTSENC_FILE_EOF'
