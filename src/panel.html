@@ -1,0 +1,233 @@
+<!doctype html><html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nTs-Encoder</title>
+<script src="/static/hls.min.js" onerror="var s=document.createElement('script');s.src='https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.13/hls.min.js';document.head.appendChild(s)"></script>
+<style>
+:root{--bg:#0b0e13;--panel:#121720;--panel2:#171e29;--line:#232b38;--tx:#e6ebf2;--mut:#7d8898;--ok:#22c55e;--warn:#f59e0b;--bad:#ff3b30;--blue:#3b82f6;--mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+*{box-sizing:border-box}html,body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--tx);padding:7px 12px;border-radius:8px}
+button:hover{border-color:#3a4558}button.pri{background:var(--tx);color:var(--bg);border-color:var(--tx);font-weight:700}
+button.red{color:#ff8a83}button.grn{color:#6ee7a0}button.sm{padding:4px 9px;font-size:12.5px}
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:14px;padding:12px 18px;background:rgba(11,14,19,.92);backdrop-filter:blur(6px);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:800;letter-spacing:.01em;font-size:16px}
+.brand .dot{width:11px;height:11px;border-radius:50%;background:var(--bad);box-shadow:0 0 10px var(--bad)}
+.meters{display:flex;flex-wrap:wrap;gap:6px;flex:1}
+.m{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:12px;color:var(--mut)}
+.m b{color:var(--tx);font-family:var(--mono);font-weight:600;margin-left:4px}
+.actions{display:flex;gap:6px;flex-wrap:wrap}
+main{padding:18px;max-width:1500px;margin:0 auto}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(360px,1fr));gap:14px}
+@media(max-width:420px){.grid{grid-template-columns:1fr}main{padding:12px}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden;display:flex;flex-direction:column}
+.card .top{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line)}
+.led{width:10px;height:10px;border-radius:50%;background:#3a4558;flex:none}
+.led.run{background:var(--ok);box-shadow:0 0 9px var(--ok)}.led.start{background:var(--warn);box-shadow:0 0 9px var(--warn);animation:bl 1s infinite}
+.led.err{background:var(--bad);box-shadow:0 0 9px var(--bad);animation:bl .6s infinite}@keyframes bl{50%{opacity:.35}}
+.card h3{margin:0;font-size:15px;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tag{font-size:11px;padding:2px 7px;border-radius:20px;border:1px solid var(--line);color:var(--mut);font-family:var(--mono)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);border-bottom:1px solid var(--line)}
+.stats div{padding:9px 12px;border-right:1px solid var(--line)}.stats div:last-child{border:0}
+.stats span{display:block;font-size:10.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.07em}
+.stats b{font-family:var(--mono);font-size:15px;font-weight:600}
+.info{padding:10px 14px;font-size:12.5px;color:var(--mut);display:grid;gap:3px}
+.info code{color:var(--tx);font-family:var(--mono);font-size:12px;word-break:break-all}
+.errbox{margin:0 14px 10px;padding:7px 9px;border-radius:7px;background:#2a1414;color:#ffb4ae;font-family:var(--mono);font-size:11.5px;word-break:break-all;max-height:60px;overflow:hidden}
+.card .bot{display:flex;gap:6px;flex-wrap:wrap;padding:10px 14px;margin-top:auto;border-top:1px solid var(--line);background:var(--panel2)}
+.empty{text-align:center;padding:60px 20px;color:var(--mut);border:1px dashed var(--line);border-radius:12px}
+dialog{background:var(--panel);color:var(--tx);border:1px solid var(--line);border-radius:14px;padding:0;width:min(900px,96vw);max-height:92vh}
+dialog::backdrop{background:rgba(0,0,0,.65)}
+.dh{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--line)}.dh h2{margin:0;font-size:16px;flex:1}
+.db{padding:16px 18px;overflow:auto;max-height:calc(92vh - 130px)}.df{display:flex;justify-content:flex-end;gap:8px;padding:12px 18px;border-top:1px solid var(--line)}
+.tabs{display:flex;gap:4px;padding:0 18px;border-bottom:1px solid var(--line);overflow-x:auto}
+.tabs button{border:0;border-bottom:2px solid transparent;border-radius:0;background:none;color:var(--mut);padding:10px 12px;white-space:nowrap}
+.tabs button.on{color:var(--tx);border-color:var(--tx)}
+.pane{display:none}.pane.on{display:block}
+.fg{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px 14px}
+.fg .w2{grid-column:span 2}.fg .w3{grid-column:1/-1}@media(max-width:520px){.fg .w2{grid-column:1/-1}}
+label.f{display:flex;flex-direction:column;gap:5px;font-size:11.5px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
+label.f input,label.f select,label.f textarea{text-transform:none;letter-spacing:0;font:13.5px var(--mono);padding:8px 10px;border-radius:7px;border:1px solid var(--line);background:#0d1119;color:var(--tx);width:100%}
+label.f textarea{min-height:64px;resize:vertical}
+label.ck{flex-direction:row;align-items:center;gap:8px;text-transform:none;font-size:13.5px;color:var(--tx);padding-top:20px}
+.hint{font-size:12px;color:var(--mut);margin:12px 0 0;line-height:1.5}.hint code{font-family:var(--mono);color:#b9c3d1}
+pre.log{margin:0;font:12px/1.5 var(--mono);white-space:pre-wrap;word-break:break-all;background:#080a0e;padding:12px;border-radius:8px;min-height:300px}
+video{width:100%;background:#000;border-radius:8px;aspect-ratio:16/9}
+.dev{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:8px}
+.dev summary{cursor:pointer}.dev pre{font:11.5px var(--mono);white-space:pre-wrap;color:var(--mut);max-height:240px;overflow:auto}
+h4{margin:16px 0 8px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut)}
+.toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--tx);color:var(--bg);padding:9px 16px;border-radius:9px;font-weight:600;opacity:0;transition:.25s;pointer-events:none;z-index:99}
+.toast.on{opacity:1}
+</style></head><body>
+<header>
+  <div class="brand"><span class="dot"></span>nTs-Encoder</div>
+  <div class="meters" id="meters"></div>
+  <div class="actions">
+    <button class="pri" onclick="editCh()">+ Canal</button>
+    <button onclick="openDevices()">Dispozitive</button>
+    <button onclick="openSettings()">Setări</button>
+    <button onclick="fetch('/logout',{method:'POST'}).then(()=>location.reload())">Ieșire</button>
+  </div>
+</header>
+<main><div class="grid" id="grid"></div></main>
+
+<dialog id="dEdit"><div class="dh"><h2 id="eTitle">Canal</h2><button class="sm" onclick="showCmd()">Comanda FFmpeg</button></div>
+<div class="tabs" id="tabs"></div>
+<div class="db" id="eBody">
+<div class="pane" data-tab="General"><div class="fg">
+  <label class="f w2">Nume canal<input data-k="name"></label>
+  <label class="f ck"><input type="checkbox" data-k="enabled"> Pornit (auto-start)</label>
+</div></div>
+
+<div class="pane" data-tab="Intrare"><div class="fg">
+  <label class="f">Tip intrare<select data-k="input.type" onchange="inType()"><option value="url">Rețea (UDP/SRT/RTMP/HTTP/HLS)</option><option value="v4l2">Placă captură HDMI/SDI</option></select></label>
+  <label class="f ck"><input type="checkbox" data-k="input.hwdec"> Decodare hardware (VAAPI)</label>
+  <div class="w3 i-url fg" style="display:grid">
+    <label class="f w3">URL sursă<input data-k="input.url" placeholder="udp://239.0.0.1:1234  ·  srt://ip:9000?mode=caller  ·  http://.../stream.ts"></label>
+    <label class="f">Program (SID, opțional)<input data-k="input.program" placeholder="ex. 101"></label>
+    <label class="f ck"><input type="checkbox" data-k="input.all_audio"> Toate pistele audio</label>
+  </div>
+  <div class="w3 i-v4l2 fg" style="display:grid">
+    <label class="f">Dispozitiv video<select data-k="input.v4l2_dev" class="vdevs"></select></label>
+    <label class="f">Format<select data-k="input.v4l2_format"><option>auto</option><option>mjpeg</option><option>yuyv422</option><option>nv12</option><option>uyvy422</option><option>p010</option></select></label>
+    <label class="f">Rezoluție captură<input data-k="input.v4l2_size" placeholder="1920x1080"></label>
+    <label class="f">FPS captură<input data-k="input.v4l2_fps" placeholder="gol = implicit"></label>
+    <label class="f w2">Audio (ALSA)<select data-k="input.alsa_dev" class="adevs"></select></label>
+  </div>
+</div>
+<p class="hint">Plăcile HDMI/SDI USB (Magewell, Elgato, AVerMedia, plăci UVC ieftine) și Magewell PCIe apar ca <code>/dev/videoX</code>. Pentru 1080p60 pe USB 2.0 alege <code>mjpeg</code>. Lista exactă de formate o găsești la „Dispozitive”.</p></div>
+
+<div class="pane" data-tab="Video"><div class="fg">
+  <label class="f">Codec<select data-k="video.codec"><option value="h264_vaapi">H.264 · VAAPI (GPU)</option><option value="hevc_vaapi">HEVC · VAAPI (GPU)</option><option value="h264_qsv">H.264 · QSV (GPU)</option><option value="hevc_qsv">HEVC · QSV (GPU)</option><option value="mpeg2video">MPEG-2 (CPU)</option><option value="libx264">H.264 x264 (CPU)</option><option value="copy">Copy (fără re-encodare)</option></select></label>
+  <label class="f">Bitrate video (kbps)<input type="number" data-k="video.bitrate" data-t="n"></label>
+  <label class="f">Lățime (0=original)<input type="number" data-k="video.width" data-t="n"></label>
+  <label class="f">Înălțime (0=original)<input type="number" data-k="video.height" data-t="n"></label>
+  <label class="f">FPS ieșire<select data-k="video.fps"><option value="">original</option><option>25</option><option>50</option><option>30000/1001</option><option>60000/1001</option><option>30</option><option>60</option></select></label>
+  <label class="f">Deinterlace<select data-k="video.deint"><option value="auto">auto (doar interlaced)</option><option value="on">forțat</option><option value="off">oprit</option></select></label>
+  <label class="f">GOP (cadre)<input type="number" data-k="video.gop" data-t="n"></label>
+  <label class="f">B-frames<input type="number" data-k="video.bframes" data-t="n"></label>
+  <label class="f">Profil H.264<select data-k="video.profile"><option value="high">high</option><option value="main">main</option><option value="constrained_baseline">baseline</option><option value="">implicit</option></select></label>
+  <label class="f">Low-power (VDENC)<select data-k="video.low_power"><option value="auto">auto</option><option value="on">da</option><option value="off">nu</option></select></label>
+</div>
+<p class="hint">Intel N100/N200/N305 și Gen 11+ encodează adesea doar prin <b>low-power</b> — dacă primești „No usable encoding entrypoint”, pune <code>da</code>. GOP 50 la 25 fps = keyframe la 2 s (recomandat pentru HLS/IPTV).</p></div>
+
+<div class="pane" data-tab="Audio"><div class="fg">
+  <label class="f">Codec<select data-k="audio.codec"><option value="mp2">MPEG-1 Layer II (broadcast)</option><option value="aac">AAC</option><option value="ac3">AC-3</option><option value="copy">Copy</option><option value="none">Fără audio</option></select></label>
+  <label class="f">Bitrate (kbps)<input type="number" data-k="audio.bitrate" data-t="n"></label>
+  <label class="f">Canale<select data-k="audio.channels" data-t="n"><option value="2">stereo</option><option value="1">mono</option><option value="6">5.1</option></select></label>
+  <label class="f">Sample rate<select data-k="audio.samplerate" data-t="n"><option>48000</option><option>44100</option></select></label>
+</div><p class="hint">Pentru ieșirea RTMP audio-ul e convertit automat în AAC (dacă nu e deja AAC), deci poți păstra MP2 pe multicast.</p></div>
+
+<div class="pane" data-tab="MPEG-TS"><div class="fg">
+  <label class="f">Service ID (program)<input type="number" data-k="ts.service_id" data-t="n"></label>
+  <label class="f">Service name<input data-k="ts.service_name" placeholder="= numele canalului"></label>
+  <label class="f">Provider<input data-k="ts.provider"></label>
+  <label class="f">PMT PID<input type="number" data-k="ts.pmt_pid" data-t="n"></label>
+  <label class="f">Video PID<input type="number" data-k="ts.video_pid" data-t="n"></label>
+  <label class="f">Audio PID (prima)<input type="number" data-k="ts.audio_pid" data-t="n"></label>
+  <label class="f">Muxrate CBR (kbps, 0=VBR)<input type="number" data-k="ts.muxrate" data-t="n"></label>
+  <label class="f">PCR period (ms)<input type="number" data-k="ts.pcr_period" data-t="n"></label>
+  <label class="f" style="justify-content:flex-end"><button type="button" onclick="autoMux()">Calculează muxrate</button></label>
+</div><p class="hint">Muxrate CBR umple cu pachete NULL până la o rată fixă — cum cer modulatoarele DVB-C/T și headend-urile IPTV. Regula: video + audio + ~10% overhead.</p></div>
+
+<div class="pane" data-tab="Ieșiri"><div class="fg">
+  <label class="f w2">UDP multicast (una pe linie)<textarea data-k="out.udp" placeholder="udp://239.1.1.1:1234"></textarea></label>
+  <label class="f">TTL<input type="number" data-k="out.ttl" data-t="n"></label>
+  <label class="f">IP interfață (localaddr)<input data-k="out.localaddr" placeholder="ex. 192.168.10.5"></label>
+  <label class="f w2">SRT (una pe linie)<textarea data-k="out.srt" placeholder="srt://server:9000?mode=caller&latency=400000&streamid=..."></textarea></label>
+  <label class="f w2">RTMP (una pe linie)<textarea data-k="out.rtmp" placeholder="rtmp://netstreaming.eu/live/cheie"></textarea></label>
+  <label class="f ck"><input type="checkbox" data-k="out.httpts"> HTTP-TS (/ts/ID.ts)</label>
+  <label class="f ck"><input type="checkbox" data-k="out.hls"> HLS (/hls/ID/index.m3u8)</label>
+  <label class="f">Segment HLS (s)<input type="number" data-k="out.hls_time" data-t="n"></label>
+  <label class="f">Segmente în playlist<input type="number" data-k="out.hls_list" data-t="n"></label>
+</div><p class="hint">Encoderul scrie doar UDP. SRT, RTMP și HLS rulează ca procese separate (remux fără re-encodare) cu reconectare automată — dacă serverul de destinație cade, multicastul merge mai departe. RTMP nu acceptă HEVC: folosește H.264 dacă trimiți pe RTMP.</p></div>
+</div>
+<div class="df"><button class="red" id="bDel" onclick="delCh()">Șterge</button><span style="flex:1"></span><button onclick="dEdit.close()">Anulează</button><button class="pri" onclick="saveCh()">Salvează & aplică</button></div></dialog>
+
+<dialog id="dLog"><div class="dh"><h2 id="lTitle">Jurnal</h2><button class="sm" onclick="dLog.close()">Închide</button></div><div class="db"><pre class="log" id="logBox"></pre></div></dialog>
+<dialog id="dPrev"><div class="dh"><h2 id="pTitle">Previzualizare</h2><button class="sm" onclick="closePrev()">Închide</button></div><div class="db"><video id="vid" controls muted autoplay playsinline></video><p class="hint" id="pLinks"></p></div></dialog>
+<dialog id="dDev"><div class="dh"><h2>Dispozitive</h2><button class="sm" onclick="dDev.close()">Închide</button></div><div class="db" id="devBody">Se încarcă…</div></dialog>
+<dialog id="dSet"><div class="dh"><h2>Setări</h2><button class="sm" onclick="dSet.close()">Închide</button></div><div class="db"><div class="fg">
+  <label class="f">Utilizator<input id="sUser"></label>
+  <label class="f">Port panou<input id="sPort" type="number"></label>
+  <label class="f">Dispozitiv VAAPI<input id="sDev"></label>
+  <label class="f w2">Token streamuri (gol = public)<input id="sTok" placeholder="?token=... pentru /ts și /hls"></label>
+  <label class="f">Parolă veche<input id="sOld" type="password"></label>
+  <label class="f">Parolă nouă<input id="sNew" type="password"></label>
+</div><p class="hint">Portul se aplică după <code>systemctl restart ntsenc</code>.</p></div>
+<div class="df"><button class="pri" onclick="saveSet()">Salvează</button></div></dialog>
+<div class="toast" id="toast"></div>
+
+<script>
+const $=s=>document.querySelector(s),$$=s=>[...document.querySelectorAll(s)];
+let CH=null,STATE={channels:[]},CFG={},DEV=null,hls=null;
+const toast=t=>{const e=$('#toast');e.textContent=t;e.classList.add('on');setTimeout(()=>e.classList.remove('on'),2200)};
+async function api(u,b){const r=await fetch(u,b===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(r.status==401)location.reload();const j=await r.json();if(!r.ok)throw new Error(j.error||r.status);return j}
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const dur=s=>{if(!s)return'—';const d=Math.floor(s/86400),h=Math.floor(s%86400/3600),m=Math.floor(s%3600/60);return d?`${d}z ${h}h`:h?`${h}h ${m}m`:`${m}m ${s%60}s`};
+const tok=()=>CFG.stream_token?`?token=${encodeURIComponent(CFG.stream_token)}`:'';
+
+async function refresh(){
+  try{STATE=await api('/api/state')}catch(e){return}
+  const s=STATE.sys||{};let m=`<div class="m">CPU<b>${s.cpu??'—'}%</b></div><div class="m">RAM<b>${s.mem??'—'}%</b></div>`;
+  if(s.temp)m+=`<div class="m">Temp<b>${s.temp}°C</b></div>`;
+  if(s.gpu_mhz!=null)m+=`<div class="m">GPU<b>${s.gpu_mhz}/${s.gpu_max} MHz</b></div>`;
+  if(s.load)m+=`<div class="m">Load<b>${s.load.join(' ')}</b></div>`;
+  for(const[n,v]of Object.entries(s.net||{}))if(v.tx>0.05||v.rx>0.05)m+=`<div class="m">${esc(n)}<b>↑${v.tx} ↓${v.rx} Mb</b></div>`;
+  $('#meters').innerHTML=m;
+  const g=$('#grid');
+  if(!STATE.channels.length){g.innerHTML='<div class="empty" style="grid-column:1/-1">Niciun canal. Apasă <b>+ Canal</b> ca să adaugi primul encoder.</div>';return}
+  g.innerHTML=STATE.channels.map(c=>{const st=c.st,sm=c.summary;
+    const led={'rulează':'run','pornește':'start','eroare':'err'}[st.state]||'';
+    const br=st.bitrate;
+    return `<div class="card"><div class="top"><span class="led ${led}"></span><h3>${esc(c.name)}</h3><span class="tag">SID ${sm.sid}</span><span class="tag">${esc(st.state)}</span></div>
+    <div class="stats"><div><span>FPS</span><b>${st.fps||'—'}</b></div><div><span>Bitrate</span><b>${br||'—'}</b></div><div><span>Viteză</span><b>${st.speed||'—'}</b></div><div><span>Uptime</span><b>${dur(st.running_for)}</b></div></div>
+    <div class="info"><div>Sursă: <code>${esc(sm.src)}</code></div><div>Video: <code>${esc(sm.video)}</code> · Audio: <code>${esc(sm.audio)}</code>${sm.muxrate?` · CBR <code>${sm.muxrate}k</code>`:''}</div>
+    <div>Ieșiri: <code>${esc(sm.outs.filter(x=>x.startsWith('udp')).join('  ·  ')||'—')}</code>${sm.httpts?' · <code>HTTP-TS</code>':''}</div>
+    ${(st.outs||[]).map(o=>`<div><span class="led ${o.state=='activ'?'run':o.state=='eroare'?'err':''}" style="display:inline-block;width:7px;height:7px;margin-right:6px"></span>${o.kind}: <code>${esc(o.target||'/hls/'+c.id+'/index.m3u8')}</code>${o.restarts?` · reconectări ${o.restarts}`:''}${o.state=='eroare'&&o.err?`<div class="errbox" style="margin:4px 0 0">${esc(o.err)}</div>`:''}</div>`).join('')}
+    <div>Reporniri: <code>${st.restarts||0}</code> · Drop/Dup: <code>${st.drop||0}/${st.dup||0}</code>${st.clients&&st.clients.length?` · Clienți HTTP: <code>${st.clients.map(x=>x.ip).join(', ')}</code>`:''}</div></div>
+    ${st.state=='eroare'&&st.last_err?`<div class="errbox">${esc(st.last_err)}</div>`:''}
+    <div class="bot">${c.enabled?`<button class="sm red" onclick="act('${c.id}','stop')">■ Stop</button><button class="sm" onclick="act('${c.id}','restart')">↻ Restart</button>`:`<button class="sm grn" onclick="act('${c.id}','start')">▶ Start</button>`}
+    <button class="sm" onclick="editCh('${c.id}')">Editează</button><button class="sm" onclick="showLog('${c.id}','${esc(c.name)}')">Jurnal</button>
+    ${sm.hls||sm.httpts?`<button class="sm" onclick="preview('${c.id}','${esc(c.name)}',${sm.hls},${sm.httpts})">Previzualizare</button>`:''}</div></div>`}).join('');
+}
+async function act(id,a){await api(`/api/channel/${id}/${a}`,{});toast({start:'Pornit',stop:'Oprit',restart:'Repornire…'}[a]);setTimeout(refresh,600)}
+
+const getK=(o,k)=>k.split('.').reduce((a,b)=>a?.[b],o);
+const setK=(o,k,v)=>{const p=k.split('.'),l=p.pop();p.reduce((a,b)=>a[b]??={},o)[l]=v};
+async function loadDev(){if(!DEV)DEV=await api('/api/devices');
+  $$('.vdevs').forEach(s=>s.innerHTML=DEV.video.map(v=>`<option value="${v.dev}">${esc(v.dev)} — ${esc(v.name)}</option>`).join('')||'<option value="/dev/video0">/dev/video0</option>');
+  $$('.adevs').forEach(s=>s.innerHTML='<option value="">— fără audio —</option>'+DEV.audio.map(a=>`<option value="${a.dev}">${esc(a.dev)} — ${esc(a.name)}</option>`).join(''))}
+function inType(){const t=$('[data-k="input.type"]').value;$('.i-url').style.display=t=='url'?'grid':'none';$('.i-v4l2').style.display=t=='v4l2'?'grid':'none'}
+function tab(n){$$('.tabs button').forEach(b=>b.classList.toggle('on',b.textContent==n));$$('.pane').forEach(p=>p.classList.toggle('on',p.dataset.tab==n))}
+$('#tabs').innerHTML=$$('.pane').map(p=>`<button onclick="tab('${p.dataset.tab}')">${p.dataset.tab}</button>`).join('');
+async function editCh(id){
+  CFG=await api('/api/config');await loadDev();
+  CH=id?structuredClone(CFG.channels.find(c=>c.id==id)):await api('/api/new');
+  if(!id){CH.name='Canal '+(CFG.channels.length+1);CH.ts.service_id=CFG.channels.length+1;CH.enabled=true}
+  $('#eTitle').textContent=id?'Editează: '+CH.name:'Canal nou';$('#bDel').style.display=id?'':'none';
+  for(const el of $$('[data-k]')){const v=getK(CH,el.dataset.k);
+    if(el.type=='checkbox')el.checked=!!v;else{if(el.tagName=='SELECT'&&v!=null&&![...el.options].some(o=>o.value==String(v)))el.add(new Option(v,v));el.value=v??''}}
+  inType();tab('General');dEdit.showModal()}
+function collect(){for(const el of $$('[data-k]')){let v=el.type=='checkbox'?el.checked:el.value;if(el.dataset.t=='n')v=Number(v)||0;setK(CH,el.dataset.k,v)}return CH}
+function autoMux(){collect();const a=CH.audio.codec=='none'?0:CH.audio.bitrate*(CH.input.all_audio?2:1);$('[data-k="ts.muxrate"]').value=Math.ceil(((CH.video.bitrate+a)*1.1+150)/100)*100}
+async function saveCh(){try{await api('/api/channel',collect());dEdit.close();toast('Salvat — se aplică');DEV=null;setTimeout(refresh,500)}catch(e){alert(e.message)}}
+async function delCh(){if(!confirm('Ștergi canalul '+CH.name+'?'))return;await api(`/api/channel/${CH.id}/delete`,{});dEdit.close();refresh()}
+async function showCmd(){const j=await api('/api/preview_cmd',collect());clearInterval(logT);
+  $('#lTitle').textContent='Comanda FFmpeg (previzualizare, nesalvat)';$('#logBox').textContent=j.cmd;dLog.showModal()}
+let logT=null;async function showLog(id,n){$('#lTitle').textContent='Jurnal: '+n;const f=async()=>{const j=await api(`/api/channel/${id}/log`);const b=$('#logBox');const end=b.scrollHeight-b.scrollTop-b.clientHeight<40;b.textContent=j.log.join('\n')||'(gol)';if(end)b.scrollTop=1e9};
+  await f();dLog.showModal();clearInterval(logT);logT=setInterval(()=>dLog.open?f():clearInterval(logT),2000)}
+async function preview(id,n,isH,isT){CFG=await api('/api/config');$('#pTitle').textContent=n;const v=$('#vid');const base=location.origin;
+  const hu=`${base}/hls/${id}/index.m3u8${tok()}`,tu=`${base}/ts/${id}.ts${tok()}`;
+  $('#pLinks').innerHTML=(isH?`HLS: <code>${esc(hu)}</code><br>`:'')+(isT?`HTTP-TS: <code>${esc(tu)}</code> (VLC)`:'')+(isH?'':'<br>Previzualizarea în browser cere HLS activ (audio-ul HLS e convertit automat în AAC).');
+  if(isH){if(window.Hls&&Hls.isSupported()){hls=new Hls({liveSyncDurationCount:2});hls.loadSource(hu);hls.attachMedia(v)}else v.src=hu}
+  dPrev.showModal()}
+function closePrev(){if(hls){hls.destroy();hls=null}$('#vid').removeAttribute('src');dPrev.close()}
+dPrev.addEventListener('close',()=>{if(hls){hls.destroy();hls=null}});
+async function openDevices(){dDev.showModal();DEV=null;$('#devBody').textContent='Se încarcă…';await loadDev();
+  let h=`<h4>FFmpeg</h4><div class="dev"><code>${esc(DEV.ffmpeg)}</code> · SRT: <b>${DEV.srt?'da':'NU (lipsește libsrt)'}</b></div><h4>GPU (VAAPI)</h4>`;
+  h+=DEV.gpu.map(g=>`<details class="dev"><summary><b>${esc(g.dev)}</b> — ${esc(g.driver)}<br><small>Encodare: ${esc(g.enc.join(', ')||'niciun profil găsit')}</small></summary><pre>${esc(g.raw)}</pre></details>`).join('')||'<div class="dev">Niciun /dev/dri/renderD* — verifică driverul Intel.</div>';
+  h+='<h4>Captură video</h4>'+(DEV.video.map(v=>`<details class="dev"><summary><b>${esc(v.dev)}</b> — ${esc(v.name)}</summary><pre>${esc(v.formats)}</pre></details>`).join('')||'<div class="dev">Nicio placă de captură detectată.</div>');
+  h+='<h4>Captură audio (ALSA)</h4>'+(DEV.audio.map(a=>`<div class="dev"><code>${esc(a.dev)}</code> — ${esc(a.name)}</div>`).join('')||'<div class="dev">Niciun dispozitiv.</div>');
+  $('#devBody').innerHTML=h}
+async function openSettings(){CFG=await api('/api/config');sUser.value=CFG.user;sPort.value=CFG.port;sDev.value=CFG.vaapi_device;sTok.value=CFG.stream_token||'';sOld.value=sNew.value='';dSet.showModal()}
+async function saveSet(){try{await api('/api/settings',{user:sUser.value,port:+sPort.value,vaapi_device:sDev.value,stream_token:sTok.value,oldpass:sOld.value,newpass:sNew.value});dSet.close();toast('Setări salvate')}catch(e){alert(e.message)}}
+api('/api/config').then(c=>CFG=c);refresh();setInterval(refresh,2000);
+</script></body></html>

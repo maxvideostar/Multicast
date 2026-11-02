@@ -1,0 +1,24 @@
+<!doctype html><html lang="ro"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>nTs-Encoder · Autentificare</title>
+<style>
+:root{--bg:#0b0e13;--panel:#131821;--line:#232b38;--tx:#e6ebf2;--mut:#7d8898;--acc:#ff3b30}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:radial-gradient(circle at 30% 20%,#141b27,#0b0e13 60%);color:var(--tx);font:15px/1.4 system-ui,Segoe UI,Roboto,sans-serif}
+form{width:min(340px,92vw);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:28px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;font-size:20px;margin-bottom:22px}
+.dot{width:12px;height:12px;border-radius:50%;background:var(--acc);box-shadow:0 0 12px var(--acc)}
+.logo small{display:block;font-weight:400;color:var(--mut);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+label{display:block;font-size:12px;color:var(--mut);margin:12px 0 5px;text-transform:uppercase;letter-spacing:.06em}
+input{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);background:#0d1119;color:var(--tx);font-size:15px}
+input:focus{outline:none;border-color:#3b82f6}
+button{margin-top:20px;width:100%;padding:11px;border:0;border-radius:8px;background:#e6ebf2;color:#0b0e13;font-weight:700;font-size:15px;cursor:pointer}
+#e{color:#ff6b62;font-size:13px;margin-top:12px;min-height:18px}
+</style></head><body>
+<form id="f"><div class="logo"><span class="dot"></span><div>nTs-Encoder<small>Multicast broadcast encoder</small></div></div>
+<label>Utilizator</label><input name="user" value="admin" autocomplete="username">
+<label>Parolă</label><input name="pass" type="password" autocomplete="current-password" autofocus>
+<button>Intră</button><div id="e"></div></form>
+<script>
+f.onsubmit=async ev=>{ev.preventDefault();e.textContent='';
+const r=await fetch('/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user:f.user.value,pass:f.pass.value})});
+if(r.ok)location.reload();else e.textContent=(await r.json()).error||'Eroare'};
+</script></body></html>
